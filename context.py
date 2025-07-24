@@ -1,8 +1,8 @@
 from pydantic import BaseModel
-
 from typing import Optional, List, Dict
 
 class UserSessionContext(BaseModel):
+    """Context model to store user session data."""
     name: str
     uid: int
     goal: Optional[dict] = None
@@ -12,3 +12,7 @@ class UserSessionContext(BaseModel):
     injury_notes: Optional[str] = None
     handoff_logs: List[str] = []
     progress_logs: List[Dict[str, str]] = []
+
+    class Config:
+        """Pydantic configuration."""
+        arbitrary_types_allowed = True

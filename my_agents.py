@@ -1,82 +1,50 @@
-from agents import Agent, Runner 
-from typing import List, Type, Optional
+import asyncio
+from typing import AsyncGenerator
 from context import UserSessionContext
+from tools.goal_analyzer import goal_analyzer_tool
+from tools.meal_planner import meal_planner_tool
+from tools.workout_recommender import workout_recommender_tool
+from tools.scheduler import checkin_scheduler_tool
+from tools.tracker import progress_tracker_tool
+from agentsF.escalation_agent import escalation_agent
+from agentsF.nutrition_expert_agent import nutrition_expert_agent
+from agentsF.injury_support_agent import injury_support_agent
+from hooks import LifecycleHooks
+from utils.streaming import stream_response
+import google.generativeai as genai
+import os
 
-# Import tools
-from tools.goal_analyzer import GoalAnalyzerTool
-from tools.meal_planner import MealPlannerTool
-from tools.workout_recommender import WorkoutRecommenderTool
-from tools.scheduler import CheckinSchedulerTool
-from tools.tracker import ProgressTrackerTool
+class HealthWellnessAgent:
+    def __init__(self, context: UserSessionContext):
+        self.context = context
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        self.model = genai.GenerativeModel("gemini-2.0-flash")
 
-# Import specific event types if needed for filtering, otherwise, check event.type string
-# from openai.types.responses import ResponseTextDeltaEvent # Uncomment if you use type checking for event.data
-
-# Optional Specialized Agents
-try:
-    from agentsf.escalation_agent import EscalationAgent
-    from agentsf.nutrition_expert_agent import NutritionExpertAgent
-    from agentsf.injury_support_agent import InjurySupportAgent
-    HANDHOFFS_ENABLED = True
-except ImportError:
-    HANDHOFFS_ENABLED = False
-
-
-class HealthWellnessPlannerAgent(Agent):
-    def __init__(self, user_session_context: UserSessionContext):
-        super().__init__(
-            name="HealthWellnessPlannerAgent",
-            tools=self._get_tools(),
-            handoffs=self._get_handoffs() if HANDHOFFS_ENABLED else None
-        )
-        self.user_session_context = user_session_context
-
-    def _get_tools(self) -> List[Type]:
-        return [
-            GoalAnalyzerTool,
-            MealPlannerTool,
-            WorkoutRecommenderTool,
-            CheckinSchedulerTool,
-            ProgressTrackerTool,
-        ]
-
-    def _get_handoffs(self) -> Optional[dict]:
-        if not HANDHOFFS_ENABLED:
-            return None
-
-        return {
-            "escalation_agent": {
-                "agent": EscalationAgent(),
-                "trigger_condition": "User wants to speak to a human coach."
-            },
-            "nutrition_expert_agent": {
-                "agent": NutritionExpertAgent(),
-                "trigger_condition": "User has diabetes, allergies, or complex dietary needs."
-            },
-            "injury_support_agent": {
-                "agent": InjurySupportAgent(),
-                "trigger_condition": "User mentions injuries or limitations."
-            }
-        }
-
-    async def run(self, input_text: str):
-        """
-        Executes the agent with the given input text and yields chunks of the output.
-        """
-        # The crucial fix: DO NOT AWAIT Runner.run_streamed() itself.
-        # It directly returns the RunResultStreaming object, which is an async iterable.
-        stream_result_obj = Runner.run_streamed( # <-- NO 'await' here!
-            starting_agent=self,
-            input=input_text,
-            context=self.user_session_context
-        )
+    async def process_input(self, user_input: str) -> AsyncGenerator[str, None]:
+        LifecycleHooks.on_agent_start(self.context, "HealthWellnessAgent")
+        if not any(word in user_input.lower() for word in ["lose", "gain", "weight", "muscle"]):
+            self.context.goal = None
+        prompt = f"Determine the primary intent of this input: '{user_input}'. Possible intents are: 'goal', 'diet', 'workout', 'injury', 'progress', 'escalation', 'nutrition'. Return only the intent."
+        intent_response = await asyncio.to_thread(self.model.generate_content, prompt)
+        intent = intent_response.text.lower().strip()
+        print(f"Detected intent: {intent}")
         
-        # Now, iterate over the events stream from the RunResultStreaming object.
-        async for event in stream_result_obj.stream_events():
-            # Filter for raw_response_event types to get the actual text chunks.
-            if event.type == "raw_response_event":
-                # Check if the data is a ResponseTextDeltaEvent and has a 'delta' field
-                if hasattr(event.data, 'delta') and event.data.delta:
-                    yield event.data.delta # Yield the text chunk
-
-# check
+        if "goal" in intent:
+            result = await goal_analyzer_tool(user_input, self.context)
+        elif "diet" in intent or "nutrition" in intent:
+            self.context.goal = None
+            result = await meal_planner_tool(user_input, self.context) if "diet" in intent else await nutrition_expert_agent(user_input, self.context)
+        elif "workout" in intent:
+            result = await workout_recommender_tool(None, self.context)
+        elif "injury" in intent:
+            result = await injury_support_agent(user_input, self.context)
+        elif "progress" in intent:
+            result = await progress_tracker_tool(user_input, self.context)
+        elif "escalation" in intent:
+            result = await escalation_agent(user_input, self.context)
+        else:
+            result = await checkin_scheduler_tool(self.context)
+        print(f"Tool result: {result}")
+        async for response in stream_response(result):
+            yield response
+        LifecycleHooks.on_agent_end(self.context, "HealthWellnessAgent")

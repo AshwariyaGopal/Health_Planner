@@ -1,67 +1,19 @@
-from agents import tool
+import asyncio
+from guardrails import validate_output
 from context import UserSessionContext
-from guardrails import WorkoutPlanOutput # Import the output guardrail for workout plans
-from typing import Dict, Any
+from hooks import LifecycleHooks
+import google.generativeai as genai
+import os
 
-# @tool
-async def WorkoutRecommenderTool(context:UserSessionContext) -> Dict[str, Any]:
-    """
-    Suggests a weekly workout plan based on the user's parsed goals and (simulated) experience level.
-    Stores the generated workout plan in the session context.
-
-    Args:
-        context: The current user session context, containing the parsed goal.
-
-    Returns:
-        A dictionary representing the structured workout plan, conforming to the WorkoutPlanOutput schema.
-    """
-    print("WorkoutRecommenderTool called.")
-    user_goal = context.state.goal.get("type", "general_fitness") if context.state.goal else "general_fitness"
-    # In a real scenario, you might also have an 'experience_level' in context.
-
-    workout_plan_dict = {}
-    workout_notes = ""
-
-    if user_goal == "weight_loss":
-        workout_plan_dict = {
-            "Monday": ["Full Body Strength (Beginner)", "Cardio (20 min)"],
-            "Tuesday": ["Rest"],
-            "Wednesday": ["Full Body Strength (Beginner)", "Cardio (20 min)"],
-            "Thursday": ["Rest"],
-            "Friday": ["Full Body Strength (Beginner)", "Cardio (20 min)"],
-            "Saturday": ["Active Recovery (Walk/Stretch)"],
-            "Sunday": ["Rest"]
-        }
-        workout_notes = "This plan focuses on a mix of strength training and cardio for weight loss."
-    elif user_goal == "muscle_gain":
-        workout_plan_dict = {
-            "Monday": ["Upper Body (Heavy)", "Abs"],
-            "Tuesday": ["Lower Body (Heavy)"],
-            "Wednesday": ["Rest"],
-            "Thursday": ["Upper Body (Moderate)", "Abs"],
-            "Friday": ["Lower Body (Moderate)"],
-            "Saturday": ["Active Recovery / Light Cardio"],
-            "Sunday": ["Rest"]
-        }
-        workout_notes = "This plan is a split routine focused on muscle hypertrophy."
-    else: # general_fitness or other
-        workout_plan_dict = {
-            "Monday": ["Full Body Circuit (30 min)"],
-            "Tuesday": ["Cardio (30 min)"],
-            "Wednesday": ["Yoga / Flexibility (30 min)"],
-            "Thursday": ["Full Body Circuit (30 min)"],
-            "Friday": ["Cardio (30 min)"],
-            "Saturday": ["Long Walk / Hike"],
-            "Sunday": ["Rest"]
-        }
-        workout_notes = "This is a balanced plan for general fitness and well-being."
-
-    # Validate the generated data against the WorkoutPlanOutput guardrail
-    try:
-        validated_plan = WorkoutPlanOutput(workout_plan=workout_plan_dict, workout_notes=workout_notes)
-        context.state.workout_plan = validated_plan.model_dump() # Store in context
-        print(f"Workout plan generated and stored.")
-        return validated_plan.model_dump()
-    except Exception as e:
-        print(f"Failed to generate valid workout plan: {e}")
-        return {"error": f"Could not generate a workout plan. Error: {e}"}
+async def workout_recommender_tool(goal: dict = None, context: UserSessionContext = None) -> dict:
+    LifecycleHooks.on_tool_start(context, "WorkoutRecommenderTool")
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    prompt = f"Generate a 7-day workout plan for {'a goal to ' + goal['type'] + ' ' + str(goal['quantity']) + ' ' + goal['metric'] + ' in ' + goal['duration'] if goal else 'general fitness, focusing on strength and cardio'}."
+    response = await asyncio.to_thread(model.generate_content, prompt)
+    workout_plan = {"days": response.text.split("\n")[:7] if response.text else ["Plan not available"]}
+    message = "Here’s a 7-day workout plan: " + " ".join(workout_plan["days"]) + " (full plan in progress). Consult a doctor before starting."
+    result = {"status": "success", "message": message} if validate_output(workout_plan) else {"status": "error", "message": "Failed to generate workout plan"}
+    context.workout_plan = workout_plan if context else None
+    LifecycleHooks.on_tool_end(context, "WorkoutRecommenderTool")
+    return result

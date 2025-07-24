@@ -1,56 +1,39 @@
-from agents import tool
-
+import asyncio
+from guardrails import validate_dietary_input, validate_output
 from context import UserSessionContext
-from guardrails import MealPlanOutput # Import the output guardrail for meal plans
-from typing import List, Dict, Any
-try:
-    from agents import tool
-    if not callable(tool):
-        raise ImportError
-except Exception:
-    def tool(func):
-        return func
-@tool
-async def MealPlannerTool(context: UserSessionContext) -> Dict[str, Any]:
+from hooks import LifecycleHooks
+import google.generativeai as genai
+import os
+
+async def meal_planner_tool(diet_preferences: str, context: UserSessionContext) -> list:
     """
-    Generates a 7-day meal plan based on the user's dietary preferences and goals.
-    Stores the generated meal plan in the session context.
+    Generates a 7-day meal plan based on dietary preferences.
 
     Args:
-        context: The current user session context, containing diet preferences and goal.
+        diet_preferences: User's dietary preferences.
+        context: User session context.
 
     Returns:
-        A dictionary representing the structured meal plan, conforming to the MealPlanOutput schema.
+        List of daily meal plans.
     """
-    print("MealPlannerTool called.")
-    diet_pref = context.state.diet_preferences if context.state.diet_preferences else "standard"
-    user_goal = context.state.goal.get("description", "general health") if context.state.goal else "general health"
+    LifecycleHooks.on_tool_start(context, "MealPlannerTool")
+    
+    if not validate_dietary_input(diet_preferences):
+        LifecycleHooks.on_tool_end(context, "MealPlannerTool")
+        return [{"status": "error", "message": "Invalid dietary preference"}]
 
-    # In a real scenario, you'd use an LLM call here to generate the meal plan.
-    # Example prompt for LLM:
-    # "Generate a 7-day meal plan for a user with '{diet_pref}' dietary preferences,
-    # aiming for '{user_goal}'. Ensure each day has breakfast, lunch, and dinner.
-    # Format the output as a list of strings, one string per day. Each string should start with 'Day X:'"
-
-    # Simulating LLM response for demonstration
-    meal_plan_list = [
-        f"Day 1: Breakfast - Oatmeal with berries; Lunch - {diet_pref} lentil soup; Dinner - {diet_pref} stir-fry.",
-        f"Day 2: Breakfast - {diet_pref} smoothie; Lunch - Chickpea salad sandwich; Dinner - {diet_pref} curry.",
-        f"Day 3: Breakfast - Scrambled eggs (or tofu scramble for vegan); Lunch - Quinoa salad; Dinner - {diet_pref} pasta.",
-        f"Day 4: Breakfast - Yogurt with granola; Lunch - Veggie wrap; Dinner - Baked {diet_pref} dish.",
-        f"Day 5: Breakfast - Whole wheat toast with avocado; Lunch - {diet_pref} and vegetable skewers; Dinner - {diet_pref} pizza.",
-        f"Day 6: Breakfast - Pancakes with fruit; Lunch - {diet_pref} burrito bowl; Dinner - {diet_pref} casserole.",
-        f"Day 7: Breakfast - Fruit salad; Lunch - Leftovers; Dinner - {diet_pref} soup and bread."
-    ]
-
-    dietary_notes = f"This 7-day meal plan is designed for a {diet_pref} diet, focusing on your goal of {user_goal}."
-
-    # Validate the generated data against the MealPlanOutput guardrail
-    try:
-        validated_plan = MealPlanOutput(meal_plan=meal_plan_list, dietary_notes=dietary_notes)
-        context.state.meal_plan = validated_plan.meal_plan # Store in context
-        print(f"Meal plan generated and stored.")
-        return validated_plan.model_dump()
-    except Exception as e:
-        print(f"Failed to generate valid meal plan: {e}")
-        return {"error": f"Could not generate a meal plan. Error: {e}"}
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    
+    prompt = f"Generate a 7-day {diet_preferences} meal plan with breakfast, lunch, dinner, and snacks."
+    response = await asyncio.to_thread(model.generate_content, prompt)
+    
+    meal_plan = response.text.split("\n")[:7]  # Simplified parsing for demo
+    if validate_output(meal_plan):
+        context.meal_plan = meal_plan
+        result = [{"day": i+1, "meals": meal_plan[i]} for i in range(len(meal_plan))]
+    else:
+        result = [{"status": "error", "message": "Invalid meal plan format"}]
+    
+    LifecycleHooks.on_tool_end(context, "MealPlannerTool")
+    return result
